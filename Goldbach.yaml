@@ -1,0 +1,720 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Goldbach end-to-end (robust). Builds image (CodeBuild), submits Batch job, streams NDJSON to S3. Private VPC. Project=Goldbach
+
+Parameters:
+  Mode:
+    Type: String
+    AllowedValues: [Test, Production]
+    Default: Test
+  ECRRepoName:
+    Type: String
+    Default: goldbach-worker
+  RangeStart:
+    Type: Number
+    Default: 0
+  RangeEnd:
+    Type: Number
+    Default: 100000
+  PartSizeMB:
+    Type: Number
+    Default: 8
+    MinValue: 5
+    MaxValue: 100
+    Description: Multipart chunk size for S3 NDJSON streaming (MB)
+
+Mappings:
+  ModeToMaxVCPUs:
+    Test:       { Value: 2 }
+    Production: { Value: 128 }
+
+Conditions:
+  IsTest: !Equals [!Ref Mode, 'Test']
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.41.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.41.0.0/24
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.41.1.0/24
+      MapPublicIpOnLaunch: false
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  AssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  AssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  ComputeSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Goldbach Compute SG (Batch instances)
+      SecurityGroupEgress: [{ IpProtocol: -1, CidrIp: 0.0.0.0/0 }]
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  EndpointSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Goldbach Endpoint SG (interface endpoints)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref ComputeSG
+      SecurityGroupEgress: [{ IpProtocol: -1, CidrIp: 0.0.0.0/0 }]
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Gateway
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds: [!Ref RouteTable]
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  LogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  StsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.sts
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  EcsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecs
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  EcsAgentEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecs-agent
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  EcsTelemetryEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      VpcEndpointType: Interface
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecs-telemetry
+      SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+      SecurityGroupIds: [!Ref EndpointSG]
+      PrivateDnsEnabled: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub goldbach-summaries-${AWS::AccountId}-${AWS::Region}
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerPreferred }]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  JobLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/batch/${AWS::StackName}
+      RetentionInDays: 14
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  BatchInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: [ec2.amazonaws.com] }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Policies:
+        - PolicyName: AllowS3GatewayUsage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:*']
+                Resource: ['*']
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  BatchInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BatchInstanceRole]
+
+  BatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: [batch.amazonaws.com] }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  SpotFleetRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: [spotfleet.amazonaws.com] }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  JobTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: [ecs-tasks.amazonaws.com] }, Action: sts:AssumeRole }]
+      Policies:
+        - PolicyName: AllowResultsBucketWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowWriteSpecificBucket
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+                  - s3:ListBucketMultipartUploads
+                  - s3:ListMultipartUploadParts
+                  - s3:CreateMultipartUpload
+                  - s3:CompleteMultipartUpload
+                  - s3:PutObjectTagging
+                Resource:
+                  - !Sub arn:aws:s3:::goldbach-summaries-${AWS::AccountId}-${AWS::Region}
+                  - !Sub arn:aws:s3:::goldbach-summaries-${AWS::AccountId}-${AWS::Region}/*
+              - Sid: AllowHeadList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::goldbach-summaries-${AWS::AccountId}-${AWS::Region}
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: [ecs-tasks.amazonaws.com] }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  ComputeEnv:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: !Sub ${AWS::StackName}-ComputeEnv
+      Type: MANAGED
+      State: ENABLED
+      ServiceRole: !GetAtt BatchServiceRole.Arn
+      ComputeResources:
+        Type: SPOT
+        AllocationStrategy: SPOT_CAPACITY_OPTIMIZED
+        SpotIamFleetRole: !GetAtt SpotFleetRole.Arn
+        MinvCpus: 0
+        MaxvCpus: !If [IsTest, !FindInMap [ModeToMaxVCPUs, Test, Value], !FindInMap [ModeToMaxVCPUs, Production, Value]]
+        DesiredvCpus: 0
+        InstanceTypes:
+          - !If [IsTest, optimal, c6a.large]
+          - !If [IsTest, optimal, c6i.large]
+          - !If [IsTest, optimal, m6a.large]
+          - !If [IsTest, optimal, m6i.large]
+          - !If [IsTest, optimal, c5.large]
+          - !If [IsTest, optimal, m5.large]
+        Subnets: [!Ref SubnetA, !Ref SubnetB]
+        SecurityGroupIds: [!Ref ComputeSG]
+        InstanceRole: !GetAtt BatchInstanceProfile.Arn
+        BidPercentage: 100
+        Tags: { Project: Goldbach }
+
+  JobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: !Sub ${AWS::StackName}-JobQueue
+      State: ENABLED
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref ComputeEnv
+      Tags: { Project: Goldbach }
+
+  JobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: !Sub ${AWS::StackName}-JobDef
+      Type: container
+      ContainerProperties:
+        Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRRepoName}:latest'
+        Vcpus: 1
+        Memory: 2048
+        Command: ['python3','/app/app.py']
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Sub /aws/batch/${AWS::StackName}
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: goldbach
+        Environment:
+          - { Name: OUTPUT_BUCKET, Value: !Ref ResultsBucket }
+          - { Name: OUTPUT_KEY,    Value: '' }
+          - { Name: RANGE_START,   Value: !Ref RangeStart }
+          - { Name: RANGE_END,     Value: !Ref RangeEnd }
+          - { Name: PART_SIZE_MB,  Value: !Ref PartSizeMB }
+        JobRoleArn: !GetAtt JobTaskRole.Arn
+        ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      Tags: { Project: Goldbach }
+
+  ECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ECRRepoName
+      ImageScanningConfiguration: { scanOnPush: true }
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{ Effect: Allow, Principal: { Service: [codebuild.amazonaws.com] }, Action: sts:AssumeRole }]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-Worker-Build
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: NO_ARTIFACTS }
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - { Name: ECR_REPO,  Value: !Ref ECRRepoName }
+          - { Name: IMAGE_TAG, Value: latest }
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - set -e
+                - REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-2}}"
+                - echo "Using REGION=$REGION"
+                - echo "Logging into ECR..."
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com"
+                - REPO_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$ECR_REPO"
+                - echo "Waiting for ECR repo $REPO_URI to exist..."
+                - for i in $(seq 1 30); do aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$REGION" && break || (echo "retry $i"; sleep 2); done
+            build:
+              commands:
+                - set -e
+                - mkdir -p worker
+                - |
+                  cat > worker/requirements.txt <<'REQ'
+                  boto3
+                  REQ
+                - |
+                  cat > worker/utils.py <<'PY'
+                  import boto3
+                  import io
+                  import json
+                  import logging
+                  from math import isqrt
+
+                  logger = logging.getLogger(__name__)
+                  logger.setLevel(logging.INFO)
+                  s3 = boto3.client("s3")
+
+                  class NDJSONMultipartWriter:
+                      def __init__(self, bucket: str, key: str, part_size_mb: int = 8):
+                          self.bucket = bucket
+                          self.key = key
+                          self.part_size = max(part_size_mb, 5) * 1024 * 1024
+                          self.buffer = io.BytesIO()
+                          self.parts = []
+                          resp = s3.create_multipart_upload(Bucket=bucket, Key=key, ContentType="application/x-ndjson")
+                          self.upload_id = resp["UploadId"]
+                          logger.info("Started multipart upload UploadId=%s", self.upload_id)
+
+                      def _flush_part(self):
+                          size = self.buffer.tell()
+                          if size == 0:
+                              return
+                          self.buffer.seek(0)
+                          part_number = len(self.parts) + 1
+                          resp = s3.upload_part(
+                              Bucket=self.bucket, Key=self.key,
+                              PartNumber=part_number, UploadId=self.upload_id, Body=self.buffer.read()
+                          )
+                          self.parts.append({"ETag": resp["ETag"], "PartNumber": part_number})
+                          logger.info("Uploaded part %d (%d bytes)", part_number, size)
+                          self.buffer = io.BytesIO()
+
+                      def write_obj(self, obj):
+                          line = (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
+                          self.buffer.write(line)
+                          if self.buffer.tell() >= self.part_size:
+                              self._flush_part()
+
+                      def close(self):
+                          try:
+                              self._flush_part()
+                              if self.parts:
+                                  s3.complete_multipart_upload(
+                                      Bucket=self.bucket, Key=self.key, UploadId=self.upload_id,
+                                      MultipartUpload={"Parts": self.parts}
+                                  )
+                                  logger.info("Completed multipart upload with %d parts", len(self.parts))
+                              else:
+                                  s3.abort_multipart_upload(Bucket=self.bucket, Key=self.key, UploadId=self.upload_id)
+                                  s3.put_object(Bucket=self.bucket, Key=self.key, Body=b"", ContentType="application/x-ndjson")
+                          except Exception:
+                              logger.exception("Completing multipart failed; aborting")
+                              s3.abort_multipart_upload(Bucket=self.bucket, Key=self.key, UploadId=self.upload_id)
+                              raise
+
+                  def sieve_upto(n: int):
+                      if n < 2:
+                          return [False] * (n + 1), []
+                      sp = [True] * (n + 1)
+                      sp[0] = sp[1] = False
+                      limit = isqrt(n)
+                      for p in range(2, limit + 1):
+                          if sp[p]:
+                              step = p
+                              start = p * p
+                              sp[start:n + 1:step] = [False] * (((n - start) // step) + 1)
+                      primes = [i for i, v in enumerate(sp) if v]
+                      return sp, primes
+
+                  def goldbach_pair(n: int, is_prime, primes):
+                      half = n // 2
+                      for p in primes:
+                          if p > half: break
+                          q = n - p
+                          if q >= 2 and is_prime[q]:
+                              return p, q
+                      return None
+
+                  def default_key(start: int, end: int) -> str:
+                      return f"goldbach/ranges/{start}-{end}/results.ndjson"
+
+                  def process_stream_to_s3(start: int, end: int, bucket: str, key: str, part_size_mb: int):
+                      if end < 4 or end < start:
+                          s3.put_object(Bucket=bucket, Key=key, Body=b"", ContentType="application/x-ndjson")
+                          return {"range_start": start, "range_end": end, "total_tested": 0}
+
+                      n0 = max(4, start)
+                      if n0 % 2 == 1: n0 += 1
+
+                      is_prime, primes = sieve_upto(end)
+
+                      writer = NDJSONMultipartWriter(bucket, key, part_size_mb=part_size_mb)
+                      tested = 0
+                      antiproofs = 0
+                      for n in range(n0, end + 1, 2):
+                          pair = goldbach_pair(n, is_prime, primes)
+                          if pair:
+                              p1, p2 = pair
+                              rec = {"n": n, "passes": True, "p1": p1, "p2": p2}
+                          else:
+                              rec = {"n": n, "passes": False, "p1": None, "p2": None}
+                              antiproofs += 1
+                          writer.write_obj(rec)
+                          tested += 1
+                      writer.close()
+                      return {"range_start": start, "range_end": end, "total_tested": tested, "antiproofs": antiproofs, "output_format": "ndjson"}
+                  PY
+                - |
+                  cat > worker/app.py <<'PY'
+                  import json, logging, os
+                  from utils import process_stream_to_s3, default_key
+
+                  logging.basicConfig(level=logging.INFO)
+                  logger = logging.getLogger(__name__)
+
+                  S3_BUCKET   = os.getenv("OUTPUT_BUCKET", "")
+                  OUTPUT_KEY  = (os.getenv("OUTPUT_KEY", "") or "").strip()
+                  RANGE_START = int(os.getenv("RANGE_START", "0") or "0")
+                  RANGE_END   = int(os.getenv("RANGE_END", "0") or "0")
+                  PART_SIZE_MB = int(os.getenv("PART_SIZE_MB", "8") or "8")
+
+                  def main():
+                      if not S3_BUCKET:
+                          raise RuntimeError("OUTPUT_BUCKET env var is required for streaming output")
+                      key = OUTPUT_KEY or default_key(RANGE_START, RANGE_END)
+                      logging.info("Writing NDJSON stream to s3://%s/%s", S3_BUCKET, key)
+                      summary = process_stream_to_s3(RANGE_START, RANGE_END, S3_BUCKET, key, PART_SIZE_MB)
+                      logging.info("Done. Summary: %s", json.dumps(summary))
+
+                  if __name__ == "__main__":
+                      main()
+                  PY
+                - |
+                  cat > worker/Dockerfile <<'DOCK'
+                  FROM public.ecr.aws/lts/ubuntu:22.04
+                  RUN apt-get update && apt-get install -y python3 python3-pip && rm -rf /var/lib/apt/lists/*
+                  WORKDIR /app
+                  COPY requirements.txt /app/requirements.txt
+                  RUN pip3 install --no-cache-dir -r requirements.txt
+                  COPY . /app
+                  ENV PYTHONUNBUFFERED=1
+                  CMD ["python3","/app/app.py"]
+                  DOCK
+                - echo "Pre-pulling base image (best-effort)..."
+                - docker pull public.ecr.aws/lts/ubuntu:22.04 || true
+                - echo "Building Docker image..."
+                - docker build --pull -t "$ECR_REPO:latest" -f worker/Dockerfile worker
+                - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                - REPO_URI="$ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$ECR_REPO"
+                - docker tag "$ECR_REPO:latest" "$REPO_URI:$IMAGE_TAG"
+            post_build:
+              commands:
+                - set -e
+                - echo "Pushing image..."
+                - docker push "$REPO_URI:$IMAGE_TAG"
+      TimeoutInMinutes: 30
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  BootstrapRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [lambda.amazonaws.com] }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BootstrapPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - batch:SubmitJob
+                  - batch:DescribeJobQueues
+                  - batch:DescribeJobDefinitions
+                Resource: '*'
+      Tags: [{ Key: Project, Value: Goldbach }]
+
+  BootstrapFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt BootstrapRole.Arn
+      Timeout: 900
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import json, time, urllib.request, logging, boto3
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          cb = boto3.client('codebuild')
+          batch = boto3.client('batch')
+
+          def send(cfn_event, context, status, data):
+            body = json.dumps({
+              'Status': status,
+              'Reason': f'See CloudWatch Logs for details: {context.log_stream_name}',
+              'PhysicalResourceId': context.log_stream_name,
+              'StackId': cfn_event['StackId'],
+              'RequestId': cfn_event['RequestId'],
+              'LogicalResourceId': cfn_event['LogicalResourceId'],
+              'Data': data
+            }).encode('utf-8')
+            req = urllib.request.Request(cfn_event['ResponseURL'], data=body, method='PUT',
+                                         headers={'content-type':'', 'content-length': str(len(body))})
+            with urllib.request.urlopen(req) as resp:
+              resp.read()
+
+          def wait_build(build_id, timeout=1800, poll=10):
+            deadline = time.time() + timeout
+            last = None
+            while time.time() < deadline:
+              resp = cb.batch_get_builds(ids=[build_id])
+              b = resp['builds'][0]
+              status = b.get('buildStatus')
+              ph = b.get('currentPhase')
+              if b.get('phases'):
+                last = b['phases'][-1]
+              logger.info('Build %s status=%s phase=%s', build_id, status, ph)
+              if status in ('SUCCEEDED','FAILED','FAULT','STOPPED','TIMED_OUT'):
+                return status, last
+              time.sleep(poll)
+            return 'TIMED_OUT', last
+
+          def handler(event, context):
+            logger.info('Event: %s', json.dumps(event))
+            try:
+              if event['RequestType'] == 'Delete':
+                send(event, context, 'SUCCESS', {'message':'Nothing to delete'})
+                return
+
+              proj = event['ResourceProperties']['CodeBuildProject']
+              queue = event['ResourceProperties']['JobQueue']
+              jobdef = event['ResourceProperties']['JobDefinition']
+              range_start = int(event['ResourceProperties']['RangeStart'])
+              range_end = int(event['ResourceProperties']['RangeEnd'])
+
+              resp = cb.start_build(projectName=proj)
+              build_id = resp['build']['id']
+              status, last = wait_build(build_id)
+              if status != 'SUCCEEDED':
+                details = {'buildId': build_id, 'status': status}
+                if last:
+                  details['lastPhase'] = last.get('phaseType')
+                  details['lastPhaseStatus'] = last.get('phaseStatus')
+                  if 'contexts' in last and last['contexts']:
+                    details['message'] = last['contexts'][0].get('message')
+                send(event, context, 'FAILED', details)
+                return
+
+              job_name = f"{proj}-job"[:128]
+              jr = batch.submit_job(
+                jobName=job_name,
+                jobQueue=queue,
+                jobDefinition=jobdef,
+                containerOverrides={
+                  'environment': [
+                    {'name': 'RANGE_START', 'value': str(range_start)},
+                    {'name': 'RANGE_END', 'value': str(range_end)}
+                  ]
+                }
+              )
+              data = {'buildId': build_id, 'jobId': jr['jobId']}
+              send(event, context, 'SUCCESS', data)
+            except Exception as e:
+              logger.exception('Bootstrap failed')
+              send(event, context, 'FAILED', {'error': str(e)})
+
+  Bootstrap:
+    Type: Custom::Bootstrap
+    DependsOn:
+      - ECRRepo
+      - CodeBuildProject
+      - JobDefinition
+      - JobQueue
+    Properties:
+      ServiceToken: !GetAtt BootstrapFunction.Arn
+      CodeBuildProject: !Ref CodeBuildProject
+      JobQueue: !Ref JobQueue
+      JobDefinition: !Ref JobDefinition
+      RangeStart: !Ref RangeStart
+      RangeEnd: !Ref RangeEnd
+
+Outputs:
+  ECRRepository:
+    Value: !Ref ECRRepo
+  CodeBuildProjectName:
+    Value: !Ref CodeBuildProject
+  BatchJobDefinition:
+    Value: !Ref JobDefinition
+  BatchJobQueue:
+    Value: !Ref JobQueue
+  ResultsBucket:
+    Value: !Ref ResultsBucket
+  BootstrapStatus:
+    Description: Custom resource that ran CodeBuild and submitted the Batch job
+    Value: !Ref Bootstrap
