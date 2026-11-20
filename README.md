@@ -47,3 +47,4 @@ The worker:
   {"n": 4, "passes": true, "p1": 2, "p2": 2}
   {"n": 6, "passes": true, "p1": 3, "p2": 3}
   …
+ 
